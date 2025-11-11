@@ -11,12 +11,16 @@ pr:
       - develop
 
 variables:
-  - name: buildConfiguration
-    value: 'Release'
   - name: vmImageName
     value: 'ubuntu-latest'
   - name: artifactName
     value: 'drop'
+  - name: apiDirectory
+    value: 'backend'
+  - name: webDirectory
+    value: 'frontend'
+  - name: nodeVersion
+    value: '18.x'
   - name: bicepFile
     value: 'infra/bicep/main.bicep'
   - name: Environment
@@ -44,41 +48,42 @@ variables:
 
 stages:
   - stage: Build
-    displayName: 'Compilar y ejecutar pruebas'
+    displayName: 'Compilar FrontEnd y BackEnd'
     jobs:
       - job: Build
         pool:
           vmImage: $(vmImageName)
         steps:
-          - task: UseDotNet@2
-            displayName: 'Instalar .NET SDK'
+          - task: NodeTool@0
+            displayName: 'Instalar Node.js $(nodeVersion)'
             inputs:
-              version: '8.0.x'
+              versionSpec: '$(nodeVersion)'
 
           - script: |
-              dotnet restore
-              dotnet build --configuration $(buildConfiguration)
-            displayName: 'Restaurar y compilar'
+              set -e
+              cd $(apiDirectory)
+              npm ci
+              npm run lint
+              rm -rf node_modules
+              npm ci --omit=dev
+              mkdir -p $(Build.ArtifactStagingDirectory)/api
+              cp -R . $(Build.ArtifactStagingDirectory)/api
+              cd $(Build.ArtifactStagingDirectory)/api
+              zip -r ../backend.zip .
+            displayName: 'Preparar artefacto del BackEnd'
 
           - script: |
-              dotnet test --configuration $(buildConfiguration) --collect:"XPlat Code Coverage"
-            displayName: 'Ejecutar pruebas'
-
-          - task: PublishCodeCoverageResults@2
-            displayName: 'Publicar cobertura de código'
-            inputs:
-              codeCoverageTool: 'cobertura'
-              summaryFileLocation: '$(System.DefaultWorkingDirectory)/**/*.cobertura.xml'
-
-          - task: DotNetCoreCLI@2
-            displayName: 'Publicar artefactos de la API'
-            inputs:
-              command: 'publish'
-              publishWebProjects: true
-              arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)'
+              set -e
+              cd $(webDirectory)
+              npm ci
+              npm run lint
+              npm run build
+              mkdir -p $(Build.ArtifactStagingDirectory)/frontend
+              cp -R dist $(Build.ArtifactStagingDirectory)/frontend/dist
+            displayName: 'Construir FrontEnd PWA'
 
           - publish: '$(Build.ArtifactStagingDirectory)'
-            displayName: 'Publicar artefacto'
+            displayName: 'Publicar artefactos combinados'
             artifact: $(artifactName)
 
   - stage: Deploy_Infrastructure
@@ -106,7 +111,7 @@ stages:
                   displayName: 'Desplegar infraestructura con Bicep'
                   inputs:
                     azureSubscription: '$(AzureServiceConnection)'
-                    scriptType: 'ps'
+                    scriptType: 'bash'
                     scriptLocation: 'inlineScript'
                     inlineScript: |
                       az group create --name $(resourceGroupName) --location $(Location)
@@ -131,7 +136,7 @@ stages:
       - Deploy_Infrastructure
     jobs:
       - deployment: DeployWeb
-        displayName: 'Desplegar API en App Service'
+        displayName: 'Publicar API y FrontEnd'
         environment: '$(Environment)'
         strategy:
           runOnce:
@@ -141,7 +146,7 @@ stages:
                   artifact: $(artifactName)
 
                 - task: AzureWebApp@1
-                  displayName: 'Desplegar a App Service (slot staging)'
+                  displayName: 'Desplegar API en App Service (slot staging)'
                   condition: eq(variables['EnableStagingSlot'], 'true')
                   inputs:
                     azureSubscription: '$(AzureServiceConnection)'
@@ -150,10 +155,10 @@ stages:
                     deployToSlotOrASE: true
                     resourceGroupName: '$(resourceGroupName)'
                     slotName: 'staging'
-                    package: '$(Pipeline.Workspace)/$(artifactName)/**/*.zip'
+                    package: '$(Pipeline.Workspace)/$(artifactName)/backend.zip'
 
                 - task: AzureWebApp@1
-                  displayName: 'Desplegar a App Service (producción)'
+                  displayName: 'Desplegar API en App Service (producción)'
                   condition: ne(variables['EnableStagingSlot'], 'true')
                   inputs:
                     azureSubscription: '$(AzureServiceConnection)'
@@ -161,7 +166,23 @@ stages:
                     appName: '$(webAppName)'
                     deployToSlotOrASE: false
                     resourceGroupName: '$(resourceGroupName)'
-                    package: '$(Pipeline.Workspace)/$(artifactName)/**/*.zip'
+                    package: '$(Pipeline.Workspace)/$(artifactName)/backend.zip'
+
+                - task: AzureCLI@2
+                  displayName: 'Publicar FrontEnd estático'
+                  inputs:
+                    azureSubscription: '$(AzureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      set -e
+                      key=$(az storage account keys list --resource-group $(resourceGroupName) --account-name $(storageAccountName) --query "[0].value" -o tsv)
+                      az storage blob upload-batch \
+                        --account-name $(storageAccountName) \
+                        --account-key $key \
+                        --destination '$web' \
+                        --source $(Pipeline.Workspace)/$(artifactName)/frontend/dist \
+                        --overwrite
 
                 - task: AzureAppServiceManage@0
                   displayName: 'Swap staging -> producción'
