@@ -37,7 +37,7 @@ az deployment group create \
     storageAccountName=stapipruebadev
 ```
 
-> Si necesitas un slot de staging, cambia el plan a `B1` o superior y ejecuta el despliegue con `--parameters appServiceSkuName=B1 appServiceSkuTier=Basic enableStagingSlot=true`.
+> Si necesitas un slot de staging, cambia el plan a `S1` o superior (los slots solo están disponibles en planes **Standard** o más altos) y ejecuta el despliegue con `--parameters appServiceSkuName=S1 appServiceSkuTier=Standard enableStagingSlot=true`.
 
 > Para minimizar costos una vez que finalice la oferta gratuita, puedes establecer `--parameters sqlSkuName=Basic sqlSkuTier=Basic sqlSkuCapacity=5`.
 
@@ -59,13 +59,15 @@ Configura en la biblioteca de variables de Azure DevOps o en variables secretas 
 | `Location`             | Región de Azure (por defecto `eastus`).                     |
 | `AzureServiceConnection` | Nombre del Service Connection con permisos en la suscripción. |
 | `SqlAdminLogin`        | Usuario administrador de SQL Server.                        |
-| `SqlAdminPassword`     | Contraseña segura (se sugiere almacenarla como secreto).    |
+| `SqlAdminPassword`     | Contraseña segura (debe configurarse como secreto).         |
 | `storageAccountName`   | Debe ser único a nivel global en Azure Storage.             |
 | `EnableStagingSlot`    | `true` para crear y usar un slot `staging` (requiere plan Standard o superior). |
 
 #### Integración con Azure Key Vault
 
-Para reforzar la seguridad de secretos sensibles, se recomienda conectar el pipeline con Azure Key Vault y recuperar las credenciales mediante la tarea `AzureKeyVault@2` antes de desplegar.
+Para reforzar la seguridad de secretos sensibles, configura la variable secreta `SqlAdminPassword` en la biblioteca de Azure DevOps (o pásala desde Key Vault). El pipeline valida que el valor exista antes de provisionar la infraestructura, evitando despliegues con credenciales vacías.
+
+Si prefieres recuperar el secreto directamente desde Azure Key Vault, agrega la tarea `AzureKeyVault@2` antes de las etapas de despliegue y asigna el valor obtenido a la variable `SqlAdminPassword`.
 
 ```yaml
 - task: AzureKeyVault@2

@@ -28,8 +28,6 @@ variables:
   - name: SqlAdminLogin
     value: 'sqladminapi'
   - name: SqlAdminPassword
-    value: '$(sqlAdminSecret)'
-  - name: sqlAdminSecret
     value: ''
   - name: resourceGroupName
     value: 'rg-api-prueba-errores-$(Environment)'
@@ -96,6 +94,13 @@ stages:
               steps:
                 - download: current
                   artifact: $(artifactName)
+
+                - script: |
+                    if [ -z "$(SqlAdminPassword)" ]; then
+                      echo "##vso[task.logissue type=error]Define la variable secreta 'SqlAdminPassword' antes de ejecutar el pipeline."
+                      exit 1
+                    fi
+                  displayName: 'Validar credenciales de SQL'
 
                 - task: AzureCLI@2
                   displayName: 'Desplegar infraestructura con Bicep'
