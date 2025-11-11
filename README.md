@@ -1,24 +1,57 @@
 # API-Prueba-Errores
 
+## Arquitectura de la solución
+
+El proyecto implementa un CRUD completo de formularios combinando FrontEnd PWA con BackEnd en Node.js y herramientas de Azure:
+
+- **BackEnd (`backend/`)**: API REST con Express que gestiona formularios y categorías en colecciones en memoria (`Map`,
+  `Set`, `Array`). La capa de servicios expone operaciones CRUD y validaciones reutilizables listas para conectarse a SAP CDS o a
+  una base de datos relacional.
+- **FrontEnd (`frontend/`)**: Aplicación React creada con Vite y convertida en PWA mediante `vite-plugin-pwa`. Utiliza Redux
+  Toolkit, hooks (`useEffect`, `useMemo`, `useState`) y reducers para orquestar estados, disparar peticiones asíncronas y
+  renderizar tablas con pestañas (TabPages) que se sincronizan con la API.
+- **Infraestructura (`infra/bicep/`)**: Plantilla Bicep que provisiona Azure App Service para la API, Azure SQL Database,
+  Azure Storage con sitio estático habilitado (para desplegar la build del FrontEnd) y un slot opcional de *staging*.
+- **CI/CD (`azure-pipelines.yml`)**: Pipeline de Azure DevOps que construye FrontEnd + BackEnd, publica artefactos y automatiza
+  el despliegue completo en Azure.
+
+## Ejecución local
+
+1. **API (BackEnd)**
+
+   ```bash
+   cd backend
+   npm install
+   npm run dev
+   ```
+
+   La API queda disponible en `http://localhost:4000/api` con los endpoints:
+
+   - `GET /forms` (admite filtro `?category=`)
+   - `GET /forms/:id`
+   - `POST /forms`
+   - `PUT /forms/:id`
+   - `DELETE /forms/:id`
+   - `GET /forms/metadata/categories`
+
+2. **PWA (FrontEnd)**
+
+   ```bash
+   cd frontend
+   cp .env.example .env.local # opcional
+   npm install
+   npm run dev
+   ```
+
+   Accede a `http://localhost:5173` para interactuar con la PWA. Desde las pestañas puedes filtrar por categoría, crear,
+   actualizar y eliminar formularios. El estado global se sincroniza con el BackEnd mediante `createAsyncThunk` y los cambios se
+   reflejan en las tablas (CRUD completo).
+
 ## Despliegue en Azure
-
-Este repositorio incluye los artefactos necesarios para desplegar la API y sus dependencias principales en Azure empleando Azure DevOps, priorizando recursos en niveles gratuitos o de bajo costo para entornos de desarrollo.
-
-### Arquitectura propuesta
-
-La infraestructura definida en `infra/bicep/main.bicep` provisiona los siguientes recursos administrados:
-
-- **Azure App Service Plan** (por defecto `F1` - nivel gratuito) y **App Service** para alojar la API.
-- **Azure App Service Slot** denominado `staging` para despliegues Blue/Green (opcional y solo disponible en planes Standard o superiores).
-- **Azure SQL Database** (por defecto `S0`, incluido en la oferta gratuita de 12 meses para cuentas nuevas) y su servidor lógico asociado para persistencia relacional.
-- **Azure Storage Account** para almacenamiento de artefactos y logs.
-- Variables de configuración y connection strings necesarias para la API.
-
-> Ajusta los parámetros del archivo Bicep según la región, SKU y dependencias específicas de la solución.
 
 ### Provisionamiento de infraestructura con Bicep
 
-Ejecuta el siguiente comando desde Azure CLI una vez autenticado (`az login`) y posicionado en el directorio raíz del repo:
+Ejecuta los siguientes comandos autenticado en Azure CLI (`az login`) y ubicado en la raíz del repositorio:
 
 ```bash
 az group create --name rg-api-prueba-errores-dev --location eastus
@@ -37,37 +70,43 @@ az deployment group create \
     storageAccountName=stapipruebadev
 ```
 
-> Si necesitas un slot de staging, cambia el plan a `S1` o superior (los slots solo están disponibles en planes **Standard** o más altos) y ejecuta el despliegue con `--parameters appServiceSkuName=S1 appServiceSkuTier=Standard enableStagingSlot=true`.
-
-> Para minimizar costos una vez que finalice la oferta gratuita, puedes establecer `--parameters sqlSkuName=Basic sqlSkuTier=Basic sqlSkuCapacity=5`.
+> Ajusta `appServiceSkuName`, `appServiceSkuTier` y `enableStagingSlot` si necesitas ambientes dedicados o slots adicionales. El
+> parámetro `nodeVersion` define la versión de Node.js utilizada por el App Service (por defecto `~18`). La plantilla habilita el
+> sitio estático (`$web`) de la cuenta de almacenamiento para hospedar el FrontEnd.
 
 ### Pipeline de Azure DevOps
 
-El pipeline definido en `azure-pipelines.yml` automatiza las etapas de construcción, pruebas, provisionamiento y despliegue continuo.
+El pipeline `azure-pipelines.yml` realiza tres etapas:
 
-1. **Build**: Restaura dependencias .NET, compila, ejecuta pruebas con cobertura y publica el artefacto.
-2. **Deploy_Infrastructure**: Despliega/actualiza la infraestructura declarativa utilizando Azure CLI y Bicep.
-3. **Deploy_App**: Publica el paquete de la API en el slot `staging` y, si el entorno es `prod`, realiza un swap con producción.
+1. **Build**
+   - Instala Node.js 18 y ejecuta `npm ci` + `npm run lint` tanto en BackEnd como en FrontEnd.
+   - Empaqueta el BackEnd como `backend.zip` (preparado para App Service) y publica la carpeta `dist` del FrontEnd.
+2. **Deploy_Infrastructure**
+   - Valida la presencia de `SqlAdminPassword`.
+   - Ejecuta la plantilla Bicep para alinear infraestructura.
+3. **Deploy_App**
+   - Despliega la API en App Service (slot `staging` opcional) utilizando el paquete ZIP generado.
+   - Publica el FrontEnd en el contenedor `$web` de Azure Storage mediante `az storage blob upload-batch`.
+   - Realiza swap `staging` → `production` si corresponde al entorno `prod`.
 
 #### Variables requeridas
 
-Configura en la biblioteca de variables de Azure DevOps o en variables secretas los siguientes valores antes de ejecutar el pipeline:
+Configura en la biblioteca de Azure DevOps (o como variables secretas) las siguientes claves antes de ejecutar el pipeline:
 
-| Variable               | Descripción                                                 |
-|------------------------|-------------------------------------------------------------|
-| `Environment`          | Entorno objetivo (`dev`, `qa`, `prod`).                     |
-| `Location`             | Región de Azure (por defecto `eastus`).                     |
-| `AzureServiceConnection` | Nombre del Service Connection con permisos en la suscripción. |
-| `SqlAdminLogin`        | Usuario administrador de SQL Server.                        |
-| `SqlAdminPassword`     | Contraseña segura (debe configurarse como secreto).         |
-| `storageAccountName`   | Debe ser único a nivel global en Azure Storage.             |
-| `EnableStagingSlot`    | `true` para crear y usar un slot `staging` (requiere plan Standard o superior). |
+| Variable                 | Descripción                                                                  |
+|--------------------------|------------------------------------------------------------------------------|
+| `Environment`            | Entorno objetivo (`dev`, `qa`, `prod`).                                      |
+| `Location`               | Región de Azure (por defecto `eastus`).                                      |
+| `AzureServiceConnection` | Nombre del Service Connection con permisos en la suscripción.                |
+| `SqlAdminLogin`          | Usuario administrador de SQL Server.                                         |
+| `SqlAdminPassword`       | Contraseña segura (configúrala como secreto).                                |
+| `storageAccountName`     | Debe ser único globalmente en Azure Storage.                                 |
+| `EnableStagingSlot`      | `true` para crear/usar slot `staging` (requiere plan Standard o superior).   |
 
 #### Integración con Azure Key Vault
 
-Para reforzar la seguridad de secretos sensibles, configura la variable secreta `SqlAdminPassword` en la biblioteca de Azure DevOps (o pásala desde Key Vault). El pipeline valida que el valor exista antes de provisionar la infraestructura, evitando despliegues con credenciales vacías.
-
-Si prefieres recuperar el secreto directamente desde Azure Key Vault, agrega la tarea `AzureKeyVault@2` antes de las etapas de despliegue y asigna el valor obtenido a la variable `SqlAdminPassword`.
+Para manejar secretos desde Key Vault, añade una tarea `AzureKeyVault@2` antes de los despliegues y asigna el valor recuperado
+al parámetro `SqlAdminPassword`.
 
 ```yaml
 - task: AzureKeyVault@2
@@ -77,22 +116,25 @@ Si prefieres recuperar el secreto directamente desde Azure Key Vault, agrega la 
     SecretsFilter: 'sql-admin-password'
 ```
 
-Posteriormente reemplaza el uso directo de `SqlAdminPassword` por la referencia `$(sql-admin-password)`.
+Sustituye posteriormente el uso directo de `SqlAdminPassword` por `$(sql-admin-password)`.
 
 ### Flujo de CI/CD sugerido
 
-1. Se crea un commit en `develop` y se dispara la compilación y pruebas automáticas.
-2. Al completarse correctamente, la infraestructura del entorno objetivo se alinea con el estado deseado por Bicep.
-3. El paquete publicado se despliega en el slot `staging` (si está habilitado) o directamente en producción. Tras validar, puede promoverse a producción mediante swap automático cuando `Environment` = `prod` y existe un slot configurado.
+1. Se realiza un commit en `develop`, desencadenando la etapa de *build* que valida código con linters y genera artefactos.
+2. La infraestructura del entorno objetivo se aprovisiona/actualiza con Bicep.
+3. Se despliega la API en App Service y el FrontEnd en Azure Storage. En `prod`, con slot activo, se realiza swap automático tras
+   la validación en `staging`.
 
 ### Requerimientos previos
 
+- Node.js 18 y npm 9+ para ejecución local.
 - Azure CLI 2.47+.
-- Acceso a una suscripción de Azure con permisos para crear App Service, SQL Database y Storage Account (la oferta gratuita cubre App Service F1 y una base de datos SQL S0 durante los primeros 12 meses; valida disponibilidad en tu región).
-- Service Connection en Azure DevOps con permisos de Contributor sobre el Resource Group.
+- Suscripción de Azure con permisos para App Service, Azure SQL Database y Storage Account.
+- Service Connection en Azure DevOps con permisos de *Contributor* sobre el Resource Group.
 
-### Próximos pasos
+### Próximos pasos sugeridos
 
-- Integrar pruebas automatizadas específicas de la API.
-- Configurar monitoreo con Azure Application Insights y alertas.
-- Incorporar backups automatizados de la base de datos.
+- Añadir pruebas automatizadas (Jest/Vitest) para FrontEnd y BackEnd.
+- Conectar la API a Azure SQL u orígenes SAP CDS reales.
+- Integrar Application Insights y alertas.
+- Automatizar respaldos para SQL Database y Storage.

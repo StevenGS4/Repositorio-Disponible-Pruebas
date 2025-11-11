@@ -46,8 +46,8 @@ param sqlAdminLogin string
 @description('Contraseña del administrador de la base de datos SQL')
 param sqlAdminPassword string
 
-@description('Version de .NET para el App Service, modificar según la tecnología de la API')
-param netFrameworkVersion string = 'v8.0'
+@description('Versión de Node.js para el App Service')
+param nodeVersion string = '~18'
 
 @description('Nombre de la cuenta de almacenamiento para logs y contenido estático')
 param storageAccountName string
@@ -92,8 +92,12 @@ resource webApp 'Microsoft.Web/sites@2023-12-01' = {
           name: 'ConnectionStrings__DefaultConnection'
           value: 'Server=tcp:${sqlServer.name}.database.windows.net,1433;Initial Catalog=${sqlDatabase.name};Persist Security Info=False;User ID=${sqlAdminLogin};Password=${sqlAdminPassword};MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;'
         }
+        {
+          name: 'WEBSITE_NODE_DEFAULT_VERSION'
+          value: nodeVersion
+        }
       ]
-      netFrameworkVersion: netFrameworkVersion
+      nodeVersion: nodeVersion
     }
     httpsOnly: true
   }
@@ -158,12 +162,20 @@ resource webAppSlot 'Microsoft.Web/sites/slots@2023-12-01' = if (enableStagingSl
     serverFarmId: plan.id
     siteConfig: {
       appSettings: webApp.properties.siteConfig.appSettings
-      netFrameworkVersion: netFrameworkVersion
+      nodeVersion: nodeVersion
     }
     httpsOnly: true
   }
   identity: {
     type: 'SystemAssigned'
+  }
+}
+
+resource staticWebsite 'Microsoft.Storage/storageAccounts/staticWebsite@2023-01-01' = {
+  name: '${storageAccount.name}/default'
+  properties: {
+    indexDocument: 'index.html'
+    errorDocument404Path: 'index.html'
   }
 }
 
@@ -180,3 +192,4 @@ resource slotSwap 'Microsoft.Web/sites/slots/slotsswap@2023-12-01' = if (enableS
 output webAppUrl string = webApp.properties.defaultHostName
 output storageAccountId string = storageAccount.id
 output sqlDatabaseId string = sqlDatabase.id
+output staticWebsitePrimaryEndpoint string = storageAccount.properties.primaryEndpoints.web
