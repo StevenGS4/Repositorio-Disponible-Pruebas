@@ -19,7 +19,8 @@ function createApp () {
     res.status(404).json({ message: 'Recurso no encontrado' });
   });
 
-  app.use((err, req, res, next) => {
+  // eslint-disable-next-line no-unused-vars
+  app.use((err, req, res, _next) => {
     console.error(err);
     res.status(err.status || 500).json({
       message: err.message || 'Error interno del servidor'
