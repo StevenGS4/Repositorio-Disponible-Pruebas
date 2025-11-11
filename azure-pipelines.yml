@@ -1,0 +1,169 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+variables:
+  - name: buildConfiguration
+    value: 'Release'
+  - name: vmImageName
+    value: 'ubuntu-latest'
+  - name: artifactName
+    value: 'drop'
+  - name: bicepFile
+    value: 'infra/bicep/main.bicep'
+  - name: Environment
+    value: 'dev'
+  - name: Location
+    value: 'eastus'
+  - name: AzureServiceConnection
+    value: 'sc-azure-api-prueba'
+  - name: SqlAdminLogin
+    value: 'sqladminapi'
+  - name: SqlAdminPassword
+    value: '$(sqlAdminSecret)'
+  - name: sqlAdminSecret
+    value: ''
+  - name: resourceGroupName
+    value: 'rg-api-prueba-errores-$(Environment)'
+  - name: webAppName
+    value: 'api-prueba-errores-$(Environment)'
+  - name: sqlServerName
+    value: 'sql-api-prueba-$(Environment)'
+  - name: sqlDatabaseName
+    value: 'db-api-prueba-$(Environment)'
+  - name: storageAccountName
+    value: 'stapiprueba$(Environment)'
+  - name: EnableStagingSlot
+    value: 'false'
+
+stages:
+  - stage: Build
+    displayName: 'Compilar y ejecutar pruebas'
+    jobs:
+      - job: Build
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          - task: UseDotNet@2
+            displayName: 'Instalar .NET SDK'
+            inputs:
+              version: '8.0.x'
+
+          - script: |
+              dotnet restore
+              dotnet build --configuration $(buildConfiguration)
+            displayName: 'Restaurar y compilar'
+
+          - script: |
+              dotnet test --configuration $(buildConfiguration) --collect:"XPlat Code Coverage"
+            displayName: 'Ejecutar pruebas'
+
+          - task: PublishCodeCoverageResults@2
+            displayName: 'Publicar cobertura de código'
+            inputs:
+              codeCoverageTool: 'cobertura'
+              summaryFileLocation: '$(System.DefaultWorkingDirectory)/**/*.cobertura.xml'
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Publicar artefactos de la API'
+            inputs:
+              command: 'publish'
+              publishWebProjects: true
+              arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)'
+
+          - publish: '$(Build.ArtifactStagingDirectory)'
+            displayName: 'Publicar artefacto'
+            artifact: $(artifactName)
+
+  - stage: Deploy_Infrastructure
+    displayName: 'Desplegar infraestructura Azure'
+    dependsOn: Build
+    jobs:
+      - deployment: DeployInfra
+        displayName: 'Provisionar recursos base'
+        environment: '$(Environment)'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: $(artifactName)
+
+                - task: AzureCLI@2
+                  displayName: 'Desplegar infraestructura con Bicep'
+                  inputs:
+                    azureSubscription: '$(AzureServiceConnection)'
+                    scriptType: 'ps'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      az group create --name $(resourceGroupName) --location $(Location)
+                      az deployment group create \
+                        --resource-group $(resourceGroupName) \
+                        --template-file $(bicepFile) \
+                        --parameters \
+                          webAppName=$(webAppName) \
+                          environment=$(Environment) \
+                          location=$(Location) \
+                          sqlServerName=$(sqlServerName) \
+                          sqlDatabaseName=$(sqlDatabaseName) \
+                          enableStagingSlot=$(EnableStagingSlot) \
+                          sqlAdminLogin=$(SqlAdminLogin) \
+                          sqlAdminPassword=$(SqlAdminPassword) \
+                          storageAccountName=$(storageAccountName)
+
+  - stage: Deploy_App
+    displayName: 'Desplegar aplicación'
+    dependsOn:
+      - Build
+      - Deploy_Infrastructure
+    jobs:
+      - deployment: DeployWeb
+        displayName: 'Desplegar API en App Service'
+        environment: '$(Environment)'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: $(artifactName)
+
+                - task: AzureWebApp@1
+                  displayName: 'Desplegar a App Service (slot staging)'
+                  condition: eq(variables['EnableStagingSlot'], 'true')
+                  inputs:
+                    azureSubscription: '$(AzureServiceConnection)'
+                    appType: 'webApp'
+                    appName: '$(webAppName)'
+                    deployToSlotOrASE: true
+                    resourceGroupName: '$(resourceGroupName)'
+                    slotName: 'staging'
+                    package: '$(Pipeline.Workspace)/$(artifactName)/**/*.zip'
+
+                - task: AzureWebApp@1
+                  displayName: 'Desplegar a App Service (producción)'
+                  condition: ne(variables['EnableStagingSlot'], 'true')
+                  inputs:
+                    azureSubscription: '$(AzureServiceConnection)'
+                    appType: 'webApp'
+                    appName: '$(webAppName)'
+                    deployToSlotOrASE: false
+                    resourceGroupName: '$(resourceGroupName)'
+                    package: '$(Pipeline.Workspace)/$(artifactName)/**/*.zip'
+
+                - task: AzureAppServiceManage@0
+                  displayName: 'Swap staging -> producción'
+                  condition: and(succeeded(), eq(variables['Environment'], 'prod'), eq(variables['EnableStagingSlot'], 'true'))
+                  inputs:
+                    azureSubscription: '$(AzureServiceConnection)'
+                    WebAppName: '$(webAppName)'
+                    ResourceGroupName: '$(resourceGroupName)'
+                    SourceSlot: 'staging'
+                    SwapWithProduction: true
